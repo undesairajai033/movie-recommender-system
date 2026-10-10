@@ -1,250 +1,173 @@
-# app.py
-# PURPOSE: Main entry point for the Streamlit web application
-# RUN THIS FILE with: streamlit run app.py
-#
-# This file:
-#   1. Downloads data (first time only)
-#   2. Trains the models (caches them so it's fast after first run)
-#   3. Builds the UI with tabs
+"""Streamlit app for the hybrid movie recommender.  Run: streamlit run app.py"""
 
-import streamlit as st
+import json
+import os
+
 import pandas as pd
 import plotly.express as px
+import streamlit as st
 
-# Our custom modules
-from utils.data_loader import download_data, load_movies, load_ratings
-from utils.tmdb_api import get_movie_poster, get_movie_details
-from utils.metrics import precision_at_k, recall_at_k, ndcg_at_k
-from models.content_based import ContentBasedRecommender
 from models.collaborative import CollaborativeRecommender
+from models.content_based import ContentBasedRecommender
 from models.hybrid import HybridRecommender
+from utils.data_loader import download_data, load_movies, load_ratings
+from utils.tmdb_api import get_movie_poster
 
-# ── Page config (must be first Streamlit command) ────────────────────────────
-st.set_page_config(
-    page_title="🎬 Movie Recommender",
-    page_icon="🎬",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+RESULTS_PATH = os.path.join(os.path.dirname(__file__), "results", "results.json")
 
-# ── Load & cache data ────────────────────────────────────────────────────────
-# @st.cache_data means: run this function ONCE, then reuse the result
-# Without this, data reloads every time user clicks anything (slow!)
+st.set_page_config(page_title="Movie Recommender", page_icon="🎬", layout="wide")
 
+
+# ── Data and models (cached: loaded and trained once per session) ─────────────
 @st.cache_data
 def get_data():
     download_data()
-    movies = load_movies()
-    ratings = load_ratings()
-    return movies, ratings
-
-@st.cache_resource  # cache_resource for objects like trained models
-def get_models(movies, ratings):
-    """Train all three models. Cached so training only happens once."""
-    content_model = ContentBasedRecommender()
-    content_model.fit(movies)
-
-    collab_model = CollaborativeRecommender()
-    collab_model.fit(ratings, movies)
-
-    hybrid_model = HybridRecommender(alpha=0.5)
-    hybrid_model.content_model = content_model
-    hybrid_model.collab_model = collab_model
-    hybrid_model.movies_df = movies
-    hybrid_model.is_fitted = True
-
-    return content_model, collab_model, hybrid_model
+    return load_movies(), load_ratings()
 
 
-# ── Helper: display a movie card ─────────────────────────────────────────────
-def movie_card(col, title, genres, score, score_label, year=None):
-    """Render one movie recommendation as a styled card in a Streamlit column"""
-    with col:
-        # Try to get poster
-        poster_url = get_movie_poster(title, year)
-        if poster_url:
-            st.image(poster_url, use_container_width=True)
-        else:
-            st.markdown(
-                "<div style='height:150px;background:#1e1e2e;border-radius:8px;"
-                "display:flex;align-items:center;justify-content:center;"
-                "color:#888;font-size:40px'>🎬</div>",
-                unsafe_allow_html=True
-            )
-
-        st.markdown(f"**{title}**")
-        st.caption(genres.replace("|", " · "))
-        st.progress(float(min(score, 1.0)), text=f"{score_label}: {score:.2f}")
+@st.cache_resource
+def get_models(_movies, _ratings):
+    content = ContentBasedRecommender().fit(_movies, _ratings)
+    collab = CollaborativeRecommender().fit(_ratings, _movies)
+    hybrid = HybridRecommender().use_models(content, collab, _movies)
+    return content, collab, hybrid
 
 
-# ── MAIN APP ─────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def poster(title, year):
+    return get_movie_poster(title, None if pd.isna(year) else int(year))
+
+
+def load_results():
+    try:
+        with open(RESULTS_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def movie_cards(recs: pd.DataFrame, score_col: str, score_label: str):
+    cols = st.columns(5)
+    for i, row in recs.iterrows():
+        with cols[i % 5]:
+            url = poster(row["title_clean"], row.get("year"))
+            if url:
+                st.image(url, width="stretch")
+            else:
+                st.markdown(
+                    "<div style='height:150px;background:#1e1e2e;border-radius:8px;display:flex;"
+                    "align-items:center;justify-content:center;font-size:40px'>🎬</div>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown(f"**{row['title_clean']}**")
+            st.caption(row["genres"].replace("|", " · "))
+            score = float(row[score_col])
+            st.progress(min(max(score, 0.0), 1.0), text=f"{score_label}: {score:.2f}")
+
+
 def main():
     st.title("🎬 Movie Recommender System")
-    st.caption("Built with MovieLens dataset · Content-Based + Collaborative Filtering + Hybrid")
+    st.caption("MovieLens dataset · content-based + collaborative filtering + hybrid")
 
-    # Load data
     with st.spinner("Loading data..."):
         movies, ratings = get_data()
-
-    # Train models
-    with st.spinner("Training models (first time takes ~30 seconds)..."):
+    with st.spinner("Training models (first run takes a few seconds)..."):
         content_model, collab_model, hybrid_model = get_models(movies, ratings)
-
-    st.success(f"✅ Ready! {len(movies):,} movies · {len(ratings):,} ratings loaded")
 
     # ── Sidebar ──────────────────────────────────────────────────────────────
     st.sidebar.header("⚙️ Settings")
-    n_recommendations = st.sidebar.slider("Number of recommendations", 5, 20, 10)
-    alpha = st.sidebar.slider(
-        "Hybrid blend (α)",
-        0.0, 1.0, 0.5, 0.1,
-        help="0 = pure collaborative, 1 = pure content-based"
+    n_recs = st.sidebar.slider("Number of recommendations", 5, 20, 10)
+    hybrid_model.alpha = st.sidebar.slider(
+        "Hybrid blend (α)", 0.0, 1.0, 0.05, 0.05,
+        help="0 = pure collaborative, 1 = pure content-based. 0.05 scored best on validation data.",
     )
-    hybrid_model.alpha = alpha
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**Model accuracy (RMSE)**")
-    st.sidebar.info(
-    "Collaborative Filtering: TruncatedSVD"
-)
+    results = load_results()
+    if results:
+        hyb = results["results"]["Hybrid"]
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**Offline evaluation (hybrid)**")
+        st.sidebar.metric(f"NDCG@{results['k']}", f"{hyb[f'NDCG@{results['k']}']:.3f}")
+        st.sidebar.caption("Held-out 20% of each user's ratings. See the Compare page.")
 
-    # ── Tabs ─────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "🎯 Find Similar Movies",
-        "👤 Personalized (By User)",
-        "⚡ Hybrid Mode",
-        "📊 Data Insights"
-    ])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["🎯 Similar Movies", "👤 For a User", "⚡ Hybrid", "📊 Data Insights"]
+    )
+    titles = sorted(content_model.get_all_titles())
+    user_ids = collab_model.get_all_user_ids()
 
-    # ════════════════════════════════════════════════════════════════════════
-    # TAB 1: Content-Based (find movies similar to one you choose)
-    # ════════════════════════════════════════════════════════════════════════
+    # ── Content-based ────────────────────────────────────────────────────────
     with tab1:
         st.subheader("Find movies similar to one you love")
-        st.markdown("*This uses content-based filtering — matches by genre similarity*")
-
-        all_titles = sorted(content_model.get_all_titles())
-        selected_movie = st.selectbox("Choose a movie:", all_titles, index=all_titles.index("Toy Story") if "Toy Story" in all_titles else 0)
-
-        if st.button("🔍 Find Similar Movies", key="btn_content"):
-            recs = content_model.recommend(selected_movie, n=n_recommendations)
-
+        st.caption("Content-based: matches on genre similarity, ties broken by popularity.")
+        movie = st.selectbox("Choose a movie:", titles, index=titles.index("Toy Story") if "Toy Story" in titles else 0)
+        if st.button("🔍 Find Similar Movies"):
+            recs = content_model.recommend(movie, n=n_recs)
             if recs.empty:
                 st.warning("Movie not found. Try another title.")
             else:
-                st.markdown(f"### Top {n_recommendations} movies similar to **{selected_movie}**")
-                cols = st.columns(5)
-                for i, row in recs.iterrows():
-                    movie_card(
-                        cols[i % 5],
-                        row['title_clean'],
-                        row['genres'],
-                        row['similarity_score'],
-                        "Similarity",
-                        row.get('year')
-                    )
+                st.markdown(f"### Movies similar to **{movie}**")
+                movie_cards(recs, "similarity_score", "Similarity")
 
-    # ════════════════════════════════════════════════════════════════════════
-    # TAB 2: Collaborative (personalized for a specific user)
-    # ════════════════════════════════════════════════════════════════════════
+    # ── Collaborative ────────────────────────────────────────────────────────
     with tab2:
-        st.subheader("Personalized recommendations for a user")
-        st.markdown("*This uses collaborative filtering — based on similar users' tastes*")
-
-        user_ids = collab_model.get_all_user_ids()
-        selected_user = st.selectbox("Select a User ID:", user_ids)
-
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            st.markdown("**User's rating history (sample)**")
-            history = collab_model.get_user_history(selected_user, movies)
-            st.dataframe(history.head(10), use_container_width=True)
-
-        with col_b:
-            if st.button("🎯 Get Personalized Picks", key="btn_collab"):
-                recs = collab_model.recommend_for_user(selected_user, n=n_recommendations)
-                st.markdown(f"**Top picks for User {selected_user}:**")
+        st.subheader("Personalised picks for a user")
+        st.caption("Collaborative filtering: based on what users with similar taste rated highly.")
+        user = st.selectbox("User ID:", user_ids)
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**This user's highest-rated movies**")
+            st.dataframe(collab_model.get_user_history(user, movies).head(10), width="stretch", hide_index=True)
+        with right:
+            if st.button("🎯 Get Personalised Picks"):
+                recs = collab_model.recommend_for_user(user, n=n_recs)
+                st.markdown(f"**Top picks for user {user}**")
                 st.dataframe(
-                    recs[['title_clean', 'genres', 'predicted_rating']].rename(
-                        columns={'title_clean': 'Movie', 'genres': 'Genres', 'predicted_rating': 'Predicted ⭐'}
+                    recs[["title_clean", "genres", "match_score"]].rename(
+                        columns={"title_clean": "Movie", "genres": "Genres", "match_score": "Match (0-1)"}
                     ),
-                    use_container_width=True
+                    width="stretch", hide_index=True,
                 )
 
-    # ════════════════════════════════════════════════════════════════════════
-    # TAB 3: Hybrid (best of both worlds)
-    # ════════════════════════════════════════════════════════════════════════
+    # ── Hybrid ───────────────────────────────────────────────────────────────
     with tab3:
-        st.subheader("Hybrid Recommendations")
-        st.markdown("*Combines content similarity + personalized predictions*")
+        st.subheader("Hybrid recommendations")
+        st.caption("Movies like the one you pick, re-ranked for the chosen user. No user = content-based only.")
+        c1, c2 = st.columns(2)
+        with c1:
+            ref_movie = st.selectbox("Reference movie:", titles, key="hybrid_movie")
+        with c2:
+            ref_user = st.selectbox("User ID (optional):", [None] + user_ids, key="hybrid_user")
+        if st.button("🚀 Get Hybrid Recommendations"):
+            recs = hybrid_model.recommend(ref_movie, user_id=ref_user, n=n_recs)
+            if recs.empty:
+                st.warning("Movie not found. Try another title.")
+            else:
+                st.markdown(f"### Hybrid results for **{ref_movie}**")
+                movie_cards(recs, "hybrid_score", "Hybrid score")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            all_titles = sorted(content_model.get_all_titles())
-            hybrid_movie = st.selectbox("Reference movie:", all_titles, key="hybrid_movie")
-        with col2:
-            user_ids = collab_model.get_all_user_ids()
-            hybrid_user = st.selectbox("User ID (optional):", [None] + user_ids, key="hybrid_user")
-
-        if st.button("🚀 Get Hybrid Recommendations", key="btn_hybrid"):
-            recs = hybrid_model.recommend(hybrid_movie, user_id=hybrid_user, n=n_recommendations)
-
-            if not recs.empty:
-                st.markdown(f"### Hybrid results for **{hybrid_movie}**")
-                cols = st.columns(5)
-                for i, row in recs.iterrows():
-                    movie_card(
-                        cols[i % 5],
-                        row['title_clean'],
-                        row['genres'],
-                        row['hybrid_score'],
-                        "Hybrid Score",
-                        row.get('year')
-                    )
-
-    # ════════════════════════════════════════════════════════════════════════
-    # TAB 4: Data Insights (EDA)
-    # ════════════════════════════════════════════════════════════════════════
+    # ── EDA ──────────────────────────────────────────────────────────────────
     with tab4:
-        st.subheader("📊 Dataset Insights")
+        st.subheader("📊 Dataset insights")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Movies", f"{len(movies):,}")
+        m2.metric("Ratings", f"{len(ratings):,}")
+        m3.metric("Users", f"{ratings['userId'].nunique():,}")
+        m4.metric("Average rating", f"{ratings['rating'].mean():.2f} ⭐")
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Movies", f"{len(movies):,}")
-        col2.metric("Total Ratings", f"{len(ratings):,}")
-        col3.metric("Total Users", f"{ratings['userId'].nunique():,}")
-        col4.metric("Avg Rating", f"{ratings['rating'].mean():.2f} ⭐")
+        a, b = st.columns(2)
+        with a:
+            st.plotly_chart(px.histogram(ratings, x="rating", nbins=10, title="Rating distribution"), width="stretch")
+        with b:
+            genres = movies["genres"].str.split("|").explode()
+            counts = genres[genres != "(no genres listed)"].value_counts().head(15)
+            fig = px.bar(x=counts.values, y=counts.index, orientation="h", title="Top 15 genres",
+                         labels={"x": "Movies", "y": ""})
+            fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig, width="stretch")
 
-        st.markdown("---")
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            # Rating distribution
-            fig = px.histogram(
-                ratings, x='rating', nbins=10,
-                title="Rating Distribution",
-                color_discrete_sequence=["#7F77DD"]
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        with col_b:
-            # Top genres
-            all_genres = movies['genres'].str.split('|').explode()
-            genre_counts = all_genres[all_genres != '(no genres listed)'].value_counts().head(15)
-            fig2 = px.bar(
-                x=genre_counts.values, y=genre_counts.index,
-                orientation='h',
-                title="Top 15 Genres",
-                color_discrete_sequence=["#1D9E75"]
-            )
-            fig2.update_layout(yaxis={'categoryorder': 'total ascending'})
-            st.plotly_chart(fig2, use_container_width=True)
-
-        # Movies per year
-        year_counts = movies.dropna(subset=['year']).groupby('year').size().reset_index(name='count')
-        fig3 = px.line(year_counts, x='year', y='count', title="Movies Released per Year")
-        st.plotly_chart(fig3, use_container_width=True)
+        per_year = movies.dropna(subset=["year"]).groupby("year").size().reset_index(name="movies")
+        st.plotly_chart(px.line(per_year, x="year", y="movies", title="Movies released per year"), width="stretch")
 
 
-if __name__ == "__main__":
-    main()
+main()

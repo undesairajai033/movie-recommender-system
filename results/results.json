@@ -1,0 +1,33 @@
+{
+  "k": 10,
+  "alpha": 0.05,
+  "liked_threshold": 4.0,
+  "test_size": 0.2,
+  "seed": 42,
+  "results": {
+    "Popularity (baseline)": {
+      "Precision@10": 0.1194,
+      "Recall@10": 0.096,
+      "NDCG@10": 0.1596,
+      "users": 602
+    },
+    "Content-Based": {
+      "Precision@10": 0.0236,
+      "Recall@10": 0.0167,
+      "NDCG@10": 0.0322,
+      "users": 602
+    },
+    "Collaborative (SVD)": {
+      "Precision@10": 0.1955,
+      "Recall@10": 0.2013,
+      "NDCG@10": 0.259,
+      "users": 602
+    },
+    "Hybrid": {
+      "Precision@10": 0.1965,
+      "Recall@10": 0.2044,
+      "NDCG@10": 0.2626,
+      "users": 602
+    }
+  }
+}

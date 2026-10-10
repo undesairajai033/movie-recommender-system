@@ -1,23 +1,16 @@
-# utils/tmdb_api.py
-# PURPOSE: Fetch movie posters from The Movie Database (TMDB) API
-#
-# HOW TO GET YOUR FREE API KEY:
-#   1. Go to https://www.themoviedb.org/signup
-#   2. Create a free account
-#   3. Go to Settings → API → Request an API Key (Developer)
-#   4. Copy the "API Key (v3 auth)" — looks like: a1b2c3d4e5f6...
-#   5. Paste it below where it says YOUR_API_KEY_HERE
-#
-# WHY THIS MATTERS: Showing movie posters in your demo makes it look
-# 10x more professional. Takes 2 hours to add, huge visual impact!
+"""Optional movie posters from The Movie Database (TMDB).
+
+Set a free TMDB v3 API key as the TMDB_API_KEY environment variable
+(themoviedb.org -> Settings -> API). Without a key the app still works
+and shows a placeholder instead of posters.
+"""
 
 import requests
 import os
 
-# ── PASTE YOUR API KEY HERE ────────────────────────────────────────────────
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "YOUR_API_KEY_HERE")
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
-TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w300"  # w300 = 300px wide poster
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w300"
 
 
 def get_movie_poster(movie_title: str, year: int = None) -> str | None:
@@ -50,7 +43,7 @@ def get_movie_poster(movie_title: str, year: int = None) -> str | None:
                 return f"{TMDB_IMAGE_BASE}{poster_path}"
 
     except Exception:
-        pass  # Fail silently — app still works without posters
+        pass  # posters are optional; the app works without them
 
     return None
 

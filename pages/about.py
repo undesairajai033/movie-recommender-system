@@ -57,7 +57,7 @@ Uses:
 
 - User ratings
 - User behavior patterns
-- Matrix Factorization (TruncatedSVD)
+- Matrix factorisation (TruncatedSVD, 50 latent factors)
 
 Goal:
 
@@ -87,22 +87,4 @@ Benefits:
 - Scikit-Learn
 - Streamlit
 - Plotly
-
----
-
-## Resume Skills Demonstrated
-
-✅ Recommendation Systems
-
-✅ Machine Learning
-
-✅ Collaborative Filtering
-
-✅ Content-Based Filtering
-
-✅ Feature Engineering
-
-✅ Streamlit Dashboard
-
-✅ Data Analysis
 """)

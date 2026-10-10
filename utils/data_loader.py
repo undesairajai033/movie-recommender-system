@@ -1,22 +1,16 @@
-# utils/data_loader.py
-# PURPOSE: Download and load the MovieLens dataset
-# This is the FIRST thing you run. It downloads movie data automatically.
+"""Downloads and loads the MovieLens ml-latest-small dataset (~1 MB)."""
 
 import pandas as pd
 import urllib.request
 import zipfile
 import os
 
-# ── Where data lives on your computer ──────────────────────────────────────
 DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
 MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
 
 
 def download_data():
-    """
-    Downloads MovieLens dataset if not already present.
-    Run this ONCE at the start. It saves ~1MB zip to /data folder.
-    """
+    """Download MovieLens into data/ unless it is already there."""
     zip_path = os.path.join(DATA_DIR, "ml-latest-small.zip")
     extract_path = os.path.join(DATA_DIR, "ml-latest-small")
 
@@ -67,10 +61,7 @@ def load_ratings():
 
 
 def load_all():
-    """
-    Loads both movies and ratings, and merges them.
-    Use this for EDA (Exploratory Data Analysis).
-    """
+    """Movies, ratings, and both merged (for exploratory analysis)."""
     movies = load_movies()
     ratings = load_ratings()
     merged = ratings.merge(movies, on='movieId')

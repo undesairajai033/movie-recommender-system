@@ -1,92 +1,93 @@
-# models/hybrid.py
-# PURPOSE: Combine content-based + collaborative filtering for better recommendations
-#
-# WHY HYBRID?
-#   - Content-based alone: recommends only similar genres, misses diverse preferences
-#   - Collaborative alone: fails for new users with no history (cold start problem)
-#   - Hybrid: gets the best of both worlds!
-#
-# FORMULA: hybrid_score = (α × content_score) + (1-α × collab_score)
-#   where α (alpha) is a weight between 0 and 1 (default 0.5 = equal weight)
+"""Hybrid recommender: a weighted blend of content-based and collaborative scores.
 
-import pandas as pd
+    hybrid_score = alpha * content_score + (1 - alpha) * collaborative_score
+
+Both scores are rescaled to 0-1 before blending so neither dominates by scale.
+alpha = 1.0 -> pure content-based, alpha = 0.0 -> pure collaborative.
+New users with no rating history fall back to content-based only.
+"""
+
 import numpy as np
+import pandas as pd
 from models.content_based import ContentBasedRecommender
 from models.collaborative import CollaborativeRecommender
 
 
-class HybridRecommender:
-    def __init__(self, alpha: float = 0.5):
-        """
-        alpha = weight for content-based model
-        (1-alpha) = weight for collaborative model
+def _minmax(values: np.ndarray) -> np.ndarray:
+    finite = np.isfinite(values)
+    out = np.zeros_like(values, dtype=float)
+    if finite.any():
+        lo, hi = values[finite].min(), values[finite].max()
+        out[finite] = (values[finite] - lo) / (hi - lo) if hi > lo else 0.0
+    return out
 
-        alpha=1.0 → purely content-based
-        alpha=0.0 → purely collaborative
-        alpha=0.5 → equal blend (default)
-        """
+
+class HybridRecommender:
+    def __init__(self, alpha: float = 0.05):
         self.alpha = alpha
         self.content_model = ContentBasedRecommender()
         self.collab_model = CollaborativeRecommender()
         self.movies_df = None
-        self.is_fitted = False
 
     def fit(self, movies_df: pd.DataFrame, ratings_df: pd.DataFrame):
-        """Train both models"""
-        self.movies_df = movies_df
-        print("\n--- Building Content-Based Model ---")
-        self.content_model.fit(movies_df)
-
-        print("\n--- Building Collaborative Model ---")
+        self.movies_df = movies_df.reset_index(drop=True)
+        self.content_model.fit(movies_df, ratings_df)
         self.collab_model.fit(ratings_df, movies_df)
+        return self
 
-        self.is_fitted = True
-        print("\n✅ Hybrid recommender ready!")
+    def use_models(self, content_model, collab_model, movies_df):
+        """Reuse models that were already trained (the app trains each once)."""
+        self.content_model, self.collab_model = content_model, collab_model
+        self.movies_df = movies_df.reset_index(drop=True)
+        return self
 
-    def recommend(self, movie_title: str, user_id: int = None, n: int = 10) -> pd.DataFrame:
-        """
-        Main recommendation function.
-
-        Case 1: user_id provided → full hybrid (content + collaborative)
-        Case 2: no user_id (new user) → content-based only (cold start fallback)
-
-        Returns top-N recommendations with combined score
-        """
-        # ── Get content-based recommendations ──────────────────────────
-        content_recs = self.content_model.recommend(movie_title, n=50)
-        if content_recs.empty:
+    # ── "more like this movie", personalised for a user ──────────────────────
+    def recommend(self, movie_title: str, user_id: int | None = None, n: int = 10) -> pd.DataFrame:
+        candidates = self.content_model.recommend(movie_title, n=50)
+        if candidates.empty:
             return pd.DataFrame()
 
-        # Normalize content scores to 0-1 range
-        max_score = content_recs['similarity_score'].max()
-        if max_score > 0:
-            content_recs['content_score_norm'] = content_recs['similarity_score'] / max_score
-        else:
-            content_recs['content_score_norm'] = 0
+        content = candidates["similarity_score"].to_numpy(dtype=float)
+        candidates["content_score_norm"] = content / content.max() if content.max() > 0 else 0.0
 
-        # ── If no user_id: return content-based only ────────────────────
         if user_id is None:
-            content_recs['hybrid_score'] = content_recs['content_score_norm']
-            content_recs['recommendation_type'] = 'Content-Based (No user history)'
-            return content_recs.head(n)
+            candidates["hybrid_score"] = candidates["content_score_norm"]
+            candidates["recommendation_type"] = "Content-Based (no user history)"
+            return candidates.head(n)
 
-        # ── Get collaborative predictions for these movies ──────────────
-        collab_scores = {}
-        for movie_id in content_recs['movieId']:
-            pred = self.collab_model.model.predict(user_id, movie_id)
-            # Normalize 0.5–5.0 scale to 0–1
-            collab_scores[movie_id] = (pred.est - 0.5) / 4.5
+        collab = self.collab_model.match_scores(user_id, candidates["movieId"]).to_numpy()
+        if np.isnan(collab).all():               # unknown user -> content only
+            candidates["hybrid_score"] = candidates["content_score_norm"]
+            candidates["recommendation_type"] = "Content-Based (no user history)"
+            return candidates.head(n)
+        candidates["collab_score_norm"] = np.nan_to_num(collab)
 
-        content_recs['collab_score_norm'] = content_recs['movieId'].map(collab_scores)
-
-        # ── Combine scores with alpha weighting ─────────────────────────
-        content_recs['hybrid_score'] = (
-            self.alpha * content_recs['content_score_norm'] +
-            (1 - self.alpha) * content_recs['collab_score_norm']
+        candidates["hybrid_score"] = (
+            self.alpha * candidates["content_score_norm"]
+            + (1 - self.alpha) * candidates["collab_score_norm"]
         ).round(4)
+        candidates["recommendation_type"] = "Hybrid"
+        return candidates.sort_values("hybrid_score", ascending=False).head(n).reset_index(drop=True)
 
-        content_recs['recommendation_type'] = 'Hybrid'
+    # ── top picks for a user across the whole catalogue ──────────────────────
+    def recommend_for_user(self, user_id: int, n: int = 10, user_ratings: pd.DataFrame | None = None) -> pd.DataFrame:
+        if user_ratings is None:
+            ratings = self.collab_model.ratings_df
+            user_ratings = ratings[ratings["userId"] == user_id]
 
-        # Sort by hybrid score and return top N
-        result = content_recs.sort_values('hybrid_score', ascending=False).head(n)
+        content = _minmax(self.content_model.score_user(user_ratings))
+        collab_raw = self.collab_model.score_user(user_id)
+
+        if np.isnan(collab_raw).all():          # unknown user -> content only
+            scores = content
+        else:
+            scores = self.alpha * content + (1 - self.alpha) * _minmax(collab_raw)
+
+        seen = self.content_model.id_to_row.reindex(user_ratings["movieId"]).dropna().astype(int).to_numpy()
+        scores[seen] = -np.inf
+
+        order = np.argsort(-scores)[:n]
+        result = self.movies_df.iloc[order][["movieId", "title_clean", "genres", "year"]].copy()
+        result["hybrid_score"] = scores[order].round(4)
+        result["recommendation_type"] = "Hybrid"
         return result.reset_index(drop=True)
